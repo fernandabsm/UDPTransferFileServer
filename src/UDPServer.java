@@ -4,6 +4,7 @@ import java.nio.ByteBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 
 public class UDPServer {
 
@@ -169,6 +170,24 @@ public class UDPServer {
             System.out.println("Arquivo não encontrado: " + fileName);
         }
     }
+//    private static void receberArquivo(DatagramSocket socket, InetAddress address, int port) throws IOException {
+//        // recebe o nome do arquivo enviado pelo cliente
+//        byte[] fileNameBuffer = new byte[BUFFER_SIZE];
+//        DatagramPacket fileNamePacket = new DatagramPacket(fileNameBuffer, fileNameBuffer.length);
+//        socket.receive(fileNamePacket);
+//        String fileName = new String(fileNamePacket.getData(), 0, fileNamePacket.getLength());
+//
+//        // recebe os dados do arquivo enviado pelo cliente
+//        byte[] fileBuffer = new byte[BUFFER_SIZE];
+//        DatagramPacket filePacket = new DatagramPacket(fileBuffer, fileBuffer.length);
+//        socket.receive(filePacket);
+//
+//        // salva o arquivo no servidor
+//        Path filePath = Paths.get(FILES_DIRECTORY, fileName);
+//        Files.write(filePath, filePacket.getData());
+//        System.out.println("Arquivo \"" + fileName + "\" recebido do cliente e salvo no servidor.");
+//    }
+
     private static void receberArquivo(DatagramSocket socket, InetAddress address, int port) throws IOException {
         // recebe o nome do arquivo enviado pelo cliente
         byte[] fileNameBuffer = new byte[BUFFER_SIZE];
@@ -176,15 +195,87 @@ public class UDPServer {
         socket.receive(fileNamePacket);
         String fileName = new String(fileNamePacket.getData(), 0, fileNamePacket.getLength());
 
-        // recebe os dados do arquivo enviado pelo cliente
-        byte[] fileBuffer = new byte[BUFFER_SIZE];
-        DatagramPacket filePacket = new DatagramPacket(fileBuffer, fileBuffer.length);
-        socket.receive(filePacket);
+        // envia confirmação de recebimento do tamanho do arquivo
+        DatagramPacket ackPacket = new DatagramPacket(new byte[] { 1 }, 1,  address, port);
+        socket.send(ackPacket);
 
-        // salva o arquivo no servidor
+
+        // recebe o tamanho do arquivo selecionado do servidor
+        byte[] fileSizeBytes = new byte[4];
+        DatagramPacket fileSizePacket = new DatagramPacket(fileSizeBytes, fileSizeBytes.length);
+        socket.receive(fileSizePacket);
+        int fileSize = ByteBuffer.wrap(fileSizeBytes).getInt();
+
+        // envia confirmação de recebimento do tamanho do arquivo
+        socket.send(ackPacket);
+
+        // cria buffer para armazenar os dados do arquivo recebidos
+        byte[] fileBytes = new byte[fileSize];
+
+        // inicia janela deslizante com tamanho definido pela variável WINDOW_SIZE
+        int seqNum = 0;
+        int windowBase = 0;
+        int lastAckReceived = 0;
+        boolean endOfFile = false;
+
+        // recebe os pacotes do servidor enquanto a janela deslizante não chega ao final do arquivo
+        while (!endOfFile) {
+            // envia acks para os pacotes já recebidos e processados pela janela deslizante
+            while (seqNum <= lastAckReceived + WINDOW_SIZE && seqNum < fileSize / PACKET_SIZE) {
+                ackPacket = new DatagramPacket(intToBytes(seqNum), 4,  address, port);
+                socket.send(ackPacket);
+                seqNum++;
+            }
+
+            // recebe pacote do servidor
+            byte[] packetBytes = new byte[PACKET_SIZE];
+            DatagramPacket packet = new DatagramPacket(packetBytes, packetBytes.length);
+            socket.receive(packet);
+
+            // extrai informações do pacote (número de sequência, dados)
+            int packetSeqNum = ByteBuffer.wrap(packetBytes, 0, 4).getInt();
+            byte[] packetData = Arrays.copyOfRange(packetBytes, 4, packet.getLength());
+
+            // atualiza janela deslizante
+            if (packetSeqNum >= windowBase && packetSeqNum < windowBase + WINDOW_SIZE) {
+                int dataOffset = packetSeqNum * PACKET_SIZE;
+                System.arraycopy(packetData, 0, fileBytes, dataOffset, packetData.length);
+                if (packetSeqNum == windowBase) {
+                    int numPacketsProcessed = 1;
+                    while (windowBase < fileSize / PACKET_SIZE && numPacketsProcessed < WINDOW_SIZE) {
+                        if (windowBase + numPacketsProcessed == seqNum) {
+                            break;
+                        }
+                        int nextPacketOffset = (windowBase + numPacketsProcessed) * PACKET_SIZE;
+                        if (fileBytes[nextPacketOffset] != 0) {
+                            numPacketsProcessed++;
+                        } else {
+                            break;
+                        }
+                    }
+                    lastAckReceived = windowBase + numPacketsProcessed - 1;
+                    windowBase += numPacketsProcessed;
+                }
+                if (windowBase >= fileSize / PACKET_SIZE) {
+                    endOfFile = true;
+                }
+            }
+
+            // envia ack para o último pacote processado pela janela deslizante
+            ackPacket = new DatagramPacket(intToBytes(lastAckReceived), 4, address, port);
+            socket.send(ackPacket);
+        }
+
+        // salva o arquivo no cliente
         Path filePath = Paths.get(FILES_DIRECTORY, fileName);
-        Files.write(filePath, filePacket.getData());
+        Files.write(filePath, fileBytes);
+
         System.out.println("Arquivo \"" + fileName + "\" recebido do cliente e salvo no servidor.");
+
+    }
+
+    private static byte[] intToBytes(int value) {
+        return ByteBuffer.allocate(4).putInt(value).array();
     }
 
     public static void main(String[] args) throws IOException {

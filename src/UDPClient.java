@@ -54,11 +54,6 @@ public class UDPClient {
                 System.out.print("> ");
                 operationType = scanner.nextLine();
 
-                // envia o tipo de operação selecionado pelo cliente
-                operationTypeBytes = operationType.getBytes();
-                DatagramPacket operationTypePacket = new DatagramPacket(operationTypeBytes, operationTypeBytes.length, serverAddress, SERVER_PORT);
-                socket.send(operationTypePacket);
-
                 if (operationType.equalsIgnoreCase("upload")) {
                     realizarUpload(socket, serverAddress, scanner);
                 } else if (operationType.equalsIgnoreCase("download")) {
@@ -92,29 +87,118 @@ public class UDPClient {
         socket.send(ackPacket);
     }
 
+//    private static void realizarUpload(DatagramSocket socket, InetAddress serverAddress, Scanner scanner) throws IOException {
+//        // solicita o nome do arquivo a ser enviado
+//        System.out.print("Digite o nome do arquivo a ser enviado: ");
+//        String fileName = scanner.nextLine();
+//
+//        // verifica se o arquivo existe
+//        Path filePath = Paths.get(FILES_DIRECTORY, fileName);
+//        if (!Files.exists(filePath)) {
+//            System.out.println("Arquivo não encontrado: " + fileName);
+//            return;
+//        }
+//
+//        // envia o nome do arquivo para o servidor
+//        byte[] fileNameBytes = fileName.getBytes();
+//        DatagramPacket fileNamePacket = new DatagramPacket(fileNameBytes, fileNameBytes.length, serverAddress, SERVER_PORT);
+//        socket.send(fileNamePacket);
+//
+//        // envia os dados do arquivo para o servidor
+//        byte[] fileBytes = Files.readAllBytes(filePath);
+//        DatagramPacket filePacket = new DatagramPacket(fileBytes, fileBytes.length, serverAddress, SERVER_PORT);
+//        socket.send(filePacket);
+//
+//        System.out.println("Arquivo \"" + fileName + "\" enviado para o servidor.");
+//    }
+
     private static void realizarUpload(DatagramSocket socket, InetAddress serverAddress, Scanner scanner) throws IOException {
         // solicita o nome do arquivo a ser enviado
         System.out.print("Digite o nome do arquivo a ser enviado: ");
         String fileName = scanner.nextLine();
 
-        // verifica se o arquivo existe
+
         Path filePath = Paths.get(FILES_DIRECTORY, fileName);
-        if (!Files.exists(filePath)) {
+        if (Files.exists(filePath)) {
+
+            // envia o nome do arquivo para o servidor
+            byte[] fileNameBytes = fileName.getBytes();
+            DatagramPacket fileNamePacket = new DatagramPacket(fileNameBytes, fileNameBytes.length, serverAddress, SERVER_PORT);
+            socket.send(fileNamePacket);
+
+            byte[] ackNameFileData = new byte[Integer.BYTES];
+            DatagramPacket ackNameFilePacket = new DatagramPacket(ackNameFileData, ackNameFileData.length);
+            socket.setSoTimeout(1000); // tempo de espera para ACK
+            socket.receive(ackNameFilePacket);
+            System.out.println("ACK recebido para o pacote do nome do arquivo");
+
+            byte[] fileBytes = Files.readAllBytes(filePath);
+            int fileSize = fileBytes.length;
+            int numPackets = (int) Math.ceil((double) fileSize / PACKET_SIZE);
+            int lastPacketSize = fileSize % PACKET_SIZE;
+            if (lastPacketSize == 0) {
+                lastPacketSize = PACKET_SIZE;
+            }
+            int base = 0; // base da janela
+            int nextSeqNum = 0; // próximo número de sequência a ser enviado
+            int unAckedSeqNum = 0; // próximo número de sequência esperado para ACK
+            int packetsSent = 0; // número de pacotes enviados
+
+
+            // enviar tamanho do arquivo para o cliente
+            ByteBuffer sizeBuffer = ByteBuffer.allocate(Integer.BYTES);
+            sizeBuffer.putInt(fileSize);
+            DatagramPacket sizePacket = new DatagramPacket(sizeBuffer.array(), sizeBuffer.array().length, serverAddress, SERVER_PORT);
+            socket.send(sizePacket);
+            System.out.println("Tamanho do arquivo enviado: " + fileSize + " bytes");
+
+            byte[] ackLengthFileData = new byte[Integer.BYTES];
+            DatagramPacket ackLengthFilePacket = new DatagramPacket(ackLengthFileData, ackLengthFileData.length);
+            socket.setSoTimeout(1000); // tempo de espera para ACK
+            socket.receive(ackLengthFilePacket);
+            System.out.println("ACK recebido para o pacote do tamanho do arquivo");
+
+            while (unAckedSeqNum < numPackets) {
+                // enviar pacotes ainda não confirmados e que estão dentro da janela
+                while (nextSeqNum < base + WINDOW_SIZE && nextSeqNum < numPackets) {
+                    int packetSize = nextSeqNum == numPackets - 1 ? lastPacketSize : PACKET_SIZE;
+                    byte[] packetData = new byte[packetSize];
+                    System.arraycopy(fileBytes, nextSeqNum * PACKET_SIZE, packetData, 0, packetSize);
+                    ByteBuffer packetBuffer = ByteBuffer.allocate(packetSize + Integer.BYTES);
+                    packetBuffer.putInt(nextSeqNum);
+                    packetBuffer.put(packetData);
+                    DatagramPacket packet = new DatagramPacket(packetBuffer.array(), packetBuffer.array().length, serverAddress, SERVER_PORT);
+                    socket.send(packet);
+                    System.out.println("Enviando pacote #" + nextSeqNum);
+                    nextSeqNum++;
+                    packetsSent++;
+                }
+
+                // aguardar ACK dos pacotes enviados
+                while (packetsSent > unAckedSeqNum) {
+                    byte[] ackData = new byte[Integer.BYTES];
+                    DatagramPacket ackPacket = new DatagramPacket(ackData, ackData.length);
+                    try {
+                        socket.setSoTimeout(1000); // tempo de espera para ACK
+                        socket.receive(ackPacket);
+                        int ackSeqNum = ByteBuffer.wrap(ackPacket.getData(), 0, ackPacket.getLength()).getInt();
+                        System.out.println("ACK recebido para o pacote #" + ackSeqNum);
+                        if (ackSeqNum >= base) {
+                            base = ackSeqNum + 1; // atualizar a base da janela
+                        }
+                    } catch (SocketTimeoutException e) {
+                        // timeout expirado, reenviar pacotes ainda não confirmados
+                        System.out.println("Timeout expirado. Reenviando pacotes...");
+                        nextSeqNum = base;
+                        packetsSent = 0;
+                    }
+                    unAckedSeqNum++;
+                }
+            }
+            System.out.println("Arquivo \"" + fileName + "\" enviado para o cliente.");
+        } else {
             System.out.println("Arquivo não encontrado: " + fileName);
-            return;
         }
-
-        // envia o nome do arquivo para o servidor
-        byte[] fileNameBytes = fileName.getBytes();
-        DatagramPacket fileNamePacket = new DatagramPacket(fileNameBytes, fileNameBytes.length, serverAddress, SERVER_PORT);
-        socket.send(fileNamePacket);
-
-        // envia os dados do arquivo para o servidor
-        byte[] fileBytes = Files.readAllBytes(filePath);
-        DatagramPacket filePacket = new DatagramPacket(fileBytes, fileBytes.length, serverAddress, SERVER_PORT);
-        socket.send(filePacket);
-
-        System.out.println("Arquivo \"" + fileName + "\" enviado para o servidor.");
     }
 
     private static void realizarDownload(DatagramSocket socket, InetAddress serverAddress, Scanner scanner) throws IOException {
